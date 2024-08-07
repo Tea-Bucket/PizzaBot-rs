@@ -5,5 +5,5 @@ name = "pizza-bot-rs"
 members = [
     "crates/frontend",
     "crates/backend",
-    "crates/commons",
+    "crates/common",
 ]
