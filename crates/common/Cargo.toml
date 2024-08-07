@@ -1,5 +1,5 @@
 [package]
-name = "pizza-bot-rs-commons"
+name = "pizza-bot-rs-common"
 version = "0.1.0"
 edition = "2021"
 
