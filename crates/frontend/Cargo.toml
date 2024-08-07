@@ -1,5 +1,5 @@
 [package]
-name = "PizzaBot-rs-frontend"
+name = "pizza-bot-rs-frontend"
 version = "0.1.0"
 edition = "2021"
 

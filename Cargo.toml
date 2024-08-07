@@ -1,25 +1,9 @@
 [package]
-name = "PizzaBot-rs"
-
+name = "pizza-bot-rs"
 
 [workspace]
 members = [
     "crates/frontend",
-    "crates/backend", 
+    "crates/backend",
     "crates/commons",
-]
-
-
-[workspace.metadata]
-# Custom metadata for your workspace
-
-# Information about the maintainers of the project
-maintainers = [
-    { name = "Your Name", email = "your.email@example.com" },
-    { name = "Contributor Name", email = "contributor.email@example.com" }
-]
-
-# Links to additional resources
-resources = [
-
 ]
