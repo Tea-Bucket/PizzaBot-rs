@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::orders::Price;
+
 #[derive(Serialize, Deserialize)]
 pub struct WebSiteConfig {
     pizza: PizzaConfig, // TODO Other
@@ -7,8 +9,8 @@ pub struct WebSiteConfig {
 
 #[derive(Serialize, Deserialize)]
 pub struct PizzaConfig {
-    width_of_piece_in_cm: i8,
-    length_of_piece_in_cm: i8,
-    price_per_piece: f32,
-    pieces_per_pizza: i16,
+    width_of_piece_in_cm: u8,
+    length_of_piece_in_cm: u8,
+    price_per_piece: Price,
+    pieces_per_pizza: u16,
 }
