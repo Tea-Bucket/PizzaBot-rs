@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{GetOrderResponse, Initialize, MakeOrderResponse, ClientPackage, Response, ServerPackage}, orders::{Order, OrderAmount, OrderInfo, OrderRequest, PizzaKind, PizzaKindArray, Preference}};
+use pizza_bot_rs_common::{communication::{ClientPackage, GetOrderResponse, Initialize, MakeOrderResponse, Response, ServerPackage}, orders::{Order, OrderAmount, OrderRequest, OrderState, PizzaKind, PizzaKindArray, Preference}};
 use tokio::{io::{AsyncBufReadExt, BufReader}, sync::Mutex};
 use std::{borrow::Cow, sync::Arc};
 
@@ -17,10 +17,7 @@ async fn main() {
 
 async fn spawn_client() {
     let ws_stream = match connect_async(SERVER).await {
-        Ok((stream, _)) => {
-            println!("Handshake for client has been completed");
-            stream
-        }
+        Ok((stream, _)) => stream,
         Err(e) => {
             println!("WebSocket handshake for client failed with {e}!");
             return;
@@ -32,31 +29,20 @@ async fn spawn_client() {
     let (mut sender, mut receiver) = ws_stream.split();
 
     struct Orders {
-        order_infos: Vec<OrderInfo>,
-        orders: Vec<Order>,
+        state: OrderState,
         dirty: bool
     }
 
     impl Orders {
-        fn print_if_changed(&self) {
-            if self.dirty {
-                println!("Orders have changed");
-                self.print()
-            }
-        }
-
         fn print(&self) {
-            for (info, order) in self.order_infos.iter().zip(&self.orders) {
-                println!("{}: (amounts: {:?}, preference: {}), price: {}, paid: {}", info.name, order.amounts.0, order.preference, info.price.cents as f32 / 100 as f32, info.has_paid)
+            println!("config: {:?}, valid: {}", self.state.config.0, self.state.distributions_valid);
+            for ((info, order), distr) in self.state.order_infos.iter().zip(&self.state.orders).zip(&self.state.distributions) {
+                println!("{}: (amounts: {:?}, preference: {}), given: {:?}, price: {}, paid: {}", info.name, order.amounts.0, order.preference, distr.0, info.price.cents as f32 / 100 as f32, info.has_paid)
             }
         }
     }
 
-    let mut state = Orders {
-        order_infos: Vec::new(),
-        orders: Vec::new(),
-        dirty: false
-    };
+    let state;
 
     {
         let Some(Ok(msg)) = receiver.next().await else {
@@ -92,8 +78,16 @@ async fn spawn_client() {
             return
         };
 
-        state.order_infos = response.order_infos.into_owned();
-        state.orders = response.orders.into_owned();
+        state = Orders {
+            state: OrderState {
+                order_infos: response.order_infos.into_owned(),
+                orders: response.orders.into_owned(),
+                config: response.config,
+                distributions: response.distributions.into_owned(),
+                distributions_valid: response.valid_distributions,
+            },
+            dirty: false,
+        };
     }
 
     println!("Orders:");
@@ -118,18 +112,21 @@ async fn spawn_client() {
                                     return
                                 }
                             },
-                            ServerPackage::Update(full) => {
+                            ServerPackage::Update { order, config, distributions, distributions_valid } => {
                                 let mut state = state.lock().await;
-                                match state.order_infos.binary_search_by(|info| info.name.cmp(&full.info.name)) {
+                                match state.state.order_infos.binary_search_by(|info| info.name.cmp(&order.info.name)) {
                                     Ok(index) => {
-                                        state.order_infos[index] = full.info;
-                                        state.orders[index] = full.order
+                                        state.state.order_infos[index] = order.info;
+                                        state.state.orders[index] = order.order;
                                     },
                                     Err(index) => {
-                                        state.order_infos.insert(index, full.info);
-                                        state.orders.insert(index, full.order)
+                                        state.state.order_infos.insert(index, order.info);
+                                        state.state.orders.insert(index, order.order);
                                     },
                                 }
+                                state.state.config = config;
+                                state.state.distributions = distributions.into_owned();
+                                state.state.distributions_valid = distributions_valid;
                                 state.dirty = true;
                                 drop(state)
                             }
@@ -169,16 +166,22 @@ async fn spawn_client() {
         'outer:
         loop {
             {
-                let state = state.lock().await;
-                state.print_if_changed();
+                let mut state = state.lock().await;
+                if state.dirty {
+                    println!("\x1B[36m>>> Orders have changed.\x1B[37m");
+                    state.dirty = false
+                }
                 drop(state)
             }
 
+            println!("------------------------------------");
             println!("What do you want to do?");
             println!("(1) Make new order");
             println!("(2) Get an order");
+            println!("(v) View orders");
             println!("(r) Reload");
             println!("(q) Exit");
+            println!("------------------------------------");
 
             loop {
                 buffer.clear();
@@ -186,7 +189,16 @@ async fn spawn_client() {
                     break 'outer;
                 };
 
+                println!("\x1B[2J");
                 match buffer.trim() {
+                    "v" => {
+                        let mut state = state.lock().await;
+                        state.dirty = false;
+                        state.print();
+                        drop(state);
+                        println!();
+                        continue 'outer
+                    },
                     "r" => continue 'outer,
                     "1" => {
                         println!("name: ");
@@ -272,7 +284,7 @@ async fn spawn_client() {
                             };
 
                             match response {
-                                MakeOrderResponse::Success => println!("Request added successfully"),
+                                MakeOrderResponse::Success => println!("\x1B[32m>>> Request added successfully\x1B[37m"),
                                 MakeOrderResponse::NameAlreadyRegistered => {
                                     println!("Name already exists. Do you want to try again? (y/n):");
 
@@ -381,9 +393,7 @@ async fn spawn_client() {
                     },
                     "q" => break 'outer,
 
-                    _ => {
-                        buffer.clear();
-                    }
+                    _ => println!("\x1B[31m>>> Invalid command\x1B[37m")
                 }
                 break
             }

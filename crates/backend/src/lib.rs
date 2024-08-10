@@ -1,3 +1,6 @@
+#![allow(non_upper_case_globals)]
+mod balancing;
+
 use axum::{
     extract::{
         connect_info::ConnectInfo, ws::{Message, WebSocket, WebSocketUpgrade}, Request, State
@@ -5,7 +8,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{self, GetOrderResponse, Initialize, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, Price}};
+use pizza_bot_rs_common::{communication::{self, GetOrderResponse, Initialize, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
@@ -14,19 +17,11 @@ use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-struct Orders {
-    order_infos: Vec<OrderInfo>,
-    orders: Vec<Order>,
+trait OrderStateExt {
+    fn try_add_order(&mut self, name: String, order: Order) -> Option<FullOrder>;
 }
 
-impl Orders {
-    fn new() -> Self {
-        Self {
-            order_infos: Vec::new(),
-            orders: Vec::new(),
-        }
-    }
-
+impl OrderStateExt for OrderState {
     fn try_add_order(&mut self, name: String, order: Order) -> Option<FullOrder> {
         match self.order_infos.binary_search_by(|info| info.name.cmp(&name)) {
             Ok(_) => return None,
@@ -42,9 +37,16 @@ impl Orders {
                 });
                 self.orders.insert(index, order);
 
+                let (_, config, distributions, valid) = balancing::get_best(15, &self.orders);
+
+                self.config = config;
+                self.distributions = distributions;
+                self.distributions_valid = valid;
+
                 Some(FullOrder {
                     info: self.order_infos[index].clone(),
                     order,
+                    distribution: self.distributions[index]
                 })
             },
         }
@@ -52,14 +54,14 @@ impl Orders {
 }
 
 struct AppState {
-    orders: Mutex<Orders>,
+    orders: Mutex<OrderState>,
     broadcast: broadcast::Sender<String>
 }
 
 impl AppState {
     pub fn new(broadcast: broadcast::Sender<String>) -> Self {
         Self {
-            orders: Mutex::new(Orders::new()),
+            orders: Mutex::new(OrderState::new()),
             broadcast
         }
     }
@@ -142,6 +144,9 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
         let init = Initialize {
             order_infos: Cow::Borrowed(&orders.order_infos),
             orders: Cow::Borrowed(&orders.orders),
+            config: orders.config,
+            distributions: Cow::Borrowed(&orders.distributions),
+            valid_distributions: orders.distributions_valid
         };
 
         send_serialized(&init, &mut sender).await;
@@ -179,14 +184,22 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
 
                             let mut orders = state.orders.lock().await;
                             let success = orders.try_add_order(order.name, order.order);
-                            drop(orders);
 
                             let response = match success {
                                 Some(full) => {
-                                    broadcast_serialized(ServerPackage::Update(full), &state.broadcast);
+                                    broadcast_serialized(ServerPackage::Update {
+                                        order: full,
+                                        config: orders.config,
+                                        distributions: Cow::Borrowed(&orders.distributions),
+                                        distributions_valid: orders.distributions_valid,
+                                    }, &state.broadcast);
+                                    drop(orders);
                                     MakeOrderResponse::Success
                                 },
-                                None => MakeOrderResponse::NameAlreadyRegistered,
+                                None => {
+                                    drop(orders);
+                                    MakeOrderResponse::NameAlreadyRegistered
+                                },
                             };
 
                             let mut sender = sender.lock().await;
@@ -201,11 +214,13 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
                                 Ok(index) => {
                                     let info = orders.order_infos[index].clone();
                                     let order = orders.orders[index];
+                                    let distribution = orders.distributions[index];
                                     drop(orders);
 
                                     GetOrderResponse::Success(FullOrder {
                                         info,
                                         order,
+                                        distribution
                                     })
                                 },
                                 Err(_) => {
