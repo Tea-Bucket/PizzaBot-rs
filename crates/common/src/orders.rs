@@ -1,7 +1,10 @@
-use std::{iter::Sum, mem::MaybeUninit};
+use std::{borrow::Cow, iter::Sum, mem::MaybeUninit};
 
 use serde::{Deserialize, Serialize};
 
+use crate::communication::FullOrderData;
+
+pub type OrderStateVersion = usize;
 pub type PizzaAmount = u8;
 pub type OrderAmount = usize;
 pub type Preference = f32;
@@ -13,6 +16,8 @@ pub struct Price {
 }
 
 pub struct OrderState {
+    pub version: OrderStateVersion,
+
     pub order_infos: Vec<OrderInfo>,
     pub orders: Vec<Order>,
 
@@ -22,14 +27,38 @@ pub struct OrderState {
 }
 
 impl OrderState {
-    pub fn new() -> Self {
+    pub fn new(version: OrderStateVersion) -> Self {
         Self {
+            version,
+
             order_infos: Vec::new(),
             orders: Vec::new(),
 
             config: PizzaKindArray::splat(0),
             distributions: Vec::new(),
             distributions_valid: true
+        }
+    }
+
+    pub fn from_full_data(all: FullOrderData) -> Self {
+        Self {
+            version: all.version,
+            order_infos: all.order_infos.into_owned(),
+            orders: all.orders.into_owned(),
+            config: all.config,
+            distributions: all.distributions.into_owned(),
+            distributions_valid: all.valid_distributions,
+        }
+    }
+
+    pub fn to_full_data(&self) -> FullOrderData {
+        FullOrderData {
+            version: self.version,
+            order_infos: Cow::Borrowed(&self.order_infos),
+            orders: Cow::Borrowed(&self.orders),
+            config: self.config,
+            distributions: Cow::Borrowed(&self.distributions),
+            valid_distributions: self.distributions_valid
         }
     }
 }

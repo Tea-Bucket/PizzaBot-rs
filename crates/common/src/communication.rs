@@ -2,10 +2,12 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use crate::orders::{Distribution, FullOrder, Order, OrderInfo, OrderRequest, PizzaAmount, PizzaKindArray};
+use crate::orders::{Distribution, FullOrder, Order, OrderInfo, OrderRequest, OrderStateVersion, PizzaAmount, PizzaKindArray};
 
 #[derive(Serialize, Deserialize)]
-pub struct Initialize<'a> {
+pub struct FullOrderData<'a> {
+    pub version: OrderStateVersion,
+
     pub order_infos: Cow<'a, [OrderInfo]>,
     pub orders: Cow<'a, [Order]>,
 
@@ -18,6 +20,7 @@ pub struct Initialize<'a> {
 pub enum ClientPackage {
     MakeOrder(OrderRequest),
     GetOrder(String),
+    RequestAll,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,10 +28,13 @@ pub enum ServerPackage<'a> {
     Response(Response),
     Update {
         order: FullOrder,
+
+        version: OrderStateVersion,
         config: PizzaKindArray<PizzaAmount>,
         distributions: Cow<'a, [Distribution]>,
         distributions_valid: bool
-    }
+    },
+    All(FullOrderData<'a>)
 }
 
 #[derive(Serialize, Deserialize)]

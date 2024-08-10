@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{ClientPackage, GetOrderResponse, Initialize, MakeOrderResponse, Response, ServerPackage}, orders::{Order, OrderAmount, OrderRequest, OrderState, PizzaKind, PizzaKindArray, Preference}};
+use pizza_bot_rs_common::{communication::{ClientPackage, GetOrderResponse, FullOrderData, MakeOrderResponse, Response, ServerPackage}, orders::{Order, OrderAmount, OrderRequest, OrderState, PizzaKind, PizzaKindArray, Preference}};
 use tokio::{io::{AsyncBufReadExt, BufReader}, sync::Mutex};
 use std::{borrow::Cow, sync::Arc};
 
@@ -26,7 +26,7 @@ async fn spawn_client() {
 
     let (rs, rr) = std::sync::mpsc::channel();
 
-    let (mut sender, mut receiver) = ws_stream.split();
+    let (sender, mut receiver) = ws_stream.split();
 
     struct Orders {
         state: OrderState,
@@ -73,19 +73,13 @@ async fn spawn_client() {
             }
         };
 
-        let Ok(response) = serde_json::from_str::<Initialize>(&init) else {
+        let Ok(all) = serde_json::from_str::<FullOrderData>(&init) else {
             // TODO handle malformed response
             return
         };
 
         state = Orders {
-            state: OrderState {
-                order_infos: response.order_infos.into_owned(),
-                orders: response.orders.into_owned(),
-                config: response.config,
-                distributions: response.distributions.into_owned(),
-                distributions_valid: response.valid_distributions,
-            },
+            state: OrderState::from_full_data(all),
             dirty: false,
         };
     }
@@ -95,8 +89,11 @@ async fn spawn_client() {
 
     let state = Arc::new(Mutex::new(state));
 
+    let sender = Arc::new(Mutex::new(sender));
+
     let mut recv_task = {
         let state = state.clone();
+        let sender = sender.clone();
         tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
                 match msg {
@@ -112,8 +109,28 @@ async fn spawn_client() {
                                     return
                                 }
                             },
-                            ServerPackage::Update { order, config, distributions, distributions_valid } => {
+                            ServerPackage::Update { order, version, config, distributions, distributions_valid } => {
                                 let mut state = state.lock().await;
+
+                                if state.state.version + 1 != version {
+                                    drop(state);
+
+                                    let Ok(string) = serde_json::to_string(&ClientPackage::RequestAll) else {
+                                        println!("Could not create request");
+                                        break 'blk
+                                    };
+
+                                    if sender.lock().await
+                                        .send(Message::Text(string))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break 'blk
+                                    }
+
+                                    break 'blk
+                                }
+
                                 match state.state.order_infos.binary_search_by(|info| info.name.cmp(&order.info.name)) {
                                     Ok(index) => {
                                         state.state.order_infos[index] = order.info;
@@ -127,6 +144,12 @@ async fn spawn_client() {
                                 state.state.config = config;
                                 state.state.distributions = distributions.into_owned();
                                 state.state.distributions_valid = distributions_valid;
+                                state.dirty = true;
+                                drop(state)
+                            },
+                            ServerPackage::All(all) => {
+                                let mut state = state.lock().await;
+                                state.state = OrderState::from_full_data(all);
                                 state.dirty = true;
                                 drop(state)
                             }
@@ -266,7 +289,7 @@ async fn spawn_client() {
                                 break 'outer
                             };
 
-                            if sender
+                            if sender.lock().await
                                 .send(Message::Text(string))
                                 .await
                                 .is_err()
@@ -336,7 +359,7 @@ async fn spawn_client() {
                                 break 'outer
                             };
 
-                            if sender
+                            if sender.lock().await
                                 .send(Message::Text(string))
                                 .await
                                 .is_err()
@@ -400,7 +423,7 @@ async fn spawn_client() {
         }
 
         println!("Terminating...");
-        if let Err(e) = sender
+        if let Err(e) = sender.lock().await
             .send(Message::Close(Some(CloseFrame {
                 code: CloseCode::Normal,
                 reason: Cow::from("Termination"),

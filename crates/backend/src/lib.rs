@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{self, GetOrderResponse, Initialize, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
+use pizza_bot_rs_common::{communication::{self, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
@@ -42,6 +42,7 @@ impl OrderStateExt for OrderState {
                 self.config = config;
                 self.distributions = distributions;
                 self.distributions_valid = valid;
+                self.version += 1;
 
                 Some(FullOrder {
                     info: self.order_infos[index].clone(),
@@ -61,7 +62,7 @@ struct AppState {
 impl AppState {
     pub fn new(broadcast: broadcast::Sender<String>) -> Self {
         Self {
-            orders: Mutex::new(OrderState::new()),
+            orders: Mutex::new(OrderState::new(0)),
             broadcast
         }
     }
@@ -141,13 +142,7 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
 
     {   // Send initialize package
         let orders = state.orders.lock().await;
-        let init = Initialize {
-            order_infos: Cow::Borrowed(&orders.order_infos),
-            orders: Cow::Borrowed(&orders.orders),
-            config: orders.config,
-            distributions: Cow::Borrowed(&orders.distributions),
-            valid_distributions: orders.distributions_valid
-        };
+        let init = orders.to_full_data();
 
         send_serialized(&init, &mut sender).await;
     }
@@ -190,6 +185,8 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
                                     broadcast_serialized(ServerPackage::Update {
                                         order: full,
                                         config: orders.config,
+
+                                        version: orders.version,
                                         distributions: Cow::Borrowed(&orders.distributions),
                                         distributions_valid: orders.distributions_valid,
                                     }, &state.broadcast);
@@ -233,6 +230,18 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
                             let mut sender = sender.lock().await;
                             send_serialized(ServerPackage::Response(Response::GetOrder(response)), &mut sender).await;
                             drop(sender);
+                        },
+                        communication::ClientPackage::RequestAll => {
+                            info!("Full state requested");
+
+                            {   // Send initialize package
+                                let orders = state.orders.lock().await;
+                                let init = orders.to_full_data();
+
+                                let mut sender = sender.lock().await;
+                                send_serialized(&ServerPackage::All(init), &mut sender).await;
+                                drop(sender);
+                            }
                         }
                     }
                 },
