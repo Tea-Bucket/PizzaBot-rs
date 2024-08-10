@@ -120,12 +120,12 @@ impl<T> PizzaKindArray<T> {
         }
     }
 
-    pub fn map<S>(self, f : impl FnMut(T) -> S) -> PizzaKindArray<S> {
+    pub fn map<S>(self, f: impl FnMut(T) -> S) -> PizzaKindArray<S> {
         PizzaKindArray(self.0.map(f))
     }
 
-    pub fn zip_map<S, R>(self, other : PizzaKindArray<S>, mut f : impl FnMut(T, S) -> R) -> PizzaKindArray<R> {
-        let mut res : MaybeUninit<[R; PizzaKind::Length]> = MaybeUninit::uninit();
+    pub fn zip_map<S, R>(self, other: PizzaKindArray<S>, mut f: impl FnMut(T, S) -> R) -> PizzaKindArray<R> {
+        let mut res: MaybeUninit<[R; PizzaKind::Length]> = MaybeUninit::uninit();
         for (i, (s, o)) in self.into_iter().zip(other).enumerate() {
             unsafe {
                 res.assume_init_mut()[i] = f(s, o)
@@ -135,12 +135,12 @@ impl<T> PizzaKindArray<T> {
         PizzaKindArray(unsafe { res.assume_init() })
     }
 
-    pub fn reduce(self, f : impl Fn(T, T) -> T) -> T {
+    pub fn reduce(self, f: impl Fn(T, T) -> T) -> T {
         let Some(acc) = self.0.into_iter().reduce(f) else {unreachable!()};
         return acc
     }
 
-    pub fn sum<S : Sum<T>>(self) -> S {
+    pub fn sum<S: Sum<T>>(self) -> S {
         self.into_iter().sum()
     }
 

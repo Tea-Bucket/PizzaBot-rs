@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{self, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
+use pizza_bot_rs_common::{communication::{self, EditOrderResponse, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
@@ -19,6 +19,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 trait OrderStateExt {
     fn try_add_order(&mut self, name: String, order: Order) -> Option<FullOrder>;
+    fn try_edit_order(&mut self, name: String, order: Order) -> Option<FullOrder>;
+    fn finalize_update(&mut self);
 }
 
 impl OrderStateExt for OrderState {
@@ -37,12 +39,7 @@ impl OrderStateExt for OrderState {
                 });
                 self.orders.insert(index, order);
 
-                let (_, config, distributions, valid) = balancing::get_best(15, &self.orders);
-
-                self.config = config;
-                self.distributions = distributions;
-                self.distributions_valid = valid;
-                self.version += 1;
+                self.finalize_update();
 
                 Some(FullOrder {
                     info: self.order_infos[index].clone(),
@@ -51,6 +48,42 @@ impl OrderStateExt for OrderState {
                 })
             },
         }
+    }
+
+    fn try_edit_order(&mut self, name: String, order: Order) -> Option<FullOrder> {
+        match self.order_infos.binary_search_by(|info| info.name.cmp(&name)) {
+            Ok(index) => {
+                let order = Order {
+                    preference: order.preference.clamp(0.0, 1.0),
+                    ..order
+                };
+                self.order_infos[index] = OrderInfo {
+                    name,
+                    has_paid: false,
+                    price: Price { cents: 0 },
+                };
+                self.orders[index] = order;
+
+                self.finalize_update();
+
+                Some(FullOrder {
+                    info: self.order_infos[index].clone(),
+                    order,
+                    distribution: self.distributions[index]
+                })
+            },
+            Err(_) => None
+        }
+    }
+
+    fn finalize_update(&mut self) {
+        let (_, config, distributions, valid) = balancing::get_best(15, &self.orders);
+
+        self.config = config;
+        self.distributions = distributions;
+        self.distributions_valid = valid;
+
+        self.version += 1;
     }
 }
 
@@ -201,6 +234,35 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
 
                             let mut sender = sender.lock().await;
                             send_serialized(ServerPackage::Response(Response::MakeOrder(response)), &mut sender).await;
+                            drop(sender);
+                        },
+                        communication::ClientPackage::EditOrder(order) => {
+                            info!("Order edit for `{}` with `(amount: {:?}, preference: {})` requested", order.name, order.order.amounts.0, order.order.preference);
+
+                            let mut orders = state.orders.lock().await;
+                            let success = orders.try_edit_order(order.name, order.order);
+
+                            let response = match success {
+                                Some(full) => {
+                                    broadcast_serialized(ServerPackage::Update {
+                                        order: full,
+                                        config: orders.config,
+
+                                        version: orders.version,
+                                        distributions: Cow::Borrowed(&orders.distributions),
+                                        distributions_valid: orders.distributions_valid,
+                                    }, &state.broadcast);
+                                    drop(orders);
+                                    EditOrderResponse::Success
+                                },
+                                None => {
+                                    drop(orders);
+                                    EditOrderResponse::NameNotFound
+                                },
+                            };
+
+                            let mut sender = sender.lock().await;
+                            send_serialized(ServerPackage::Response(Response::EditOrder(response)), &mut sender).await;
                             drop(sender);
                         },
                         communication::ClientPackage::GetOrder(name) => {

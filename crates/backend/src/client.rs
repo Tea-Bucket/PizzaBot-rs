@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{ClientPackage, GetOrderResponse, FullOrderData, MakeOrderResponse, Response, ServerPackage}, orders::{Order, OrderAmount, OrderRequest, OrderState, PizzaKind, PizzaKindArray, Preference}};
+use pizza_bot_rs_common::{communication::{ClientPackage, EditOrderResponse, FullOrderData, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{Order, OrderAmount, OrderRequest, OrderState, PizzaKind, PizzaKindArray, Preference}};
 use tokio::{io::{AsyncBufReadExt, BufReader}, sync::Mutex};
 use std::{borrow::Cow, sync::Arc};
 
@@ -48,6 +48,7 @@ async fn spawn_client() {
         let Some(Ok(msg)) = receiver.next().await else {
             return
         };
+
 
         let init = match msg {
             Message::Text(t) => t,
@@ -200,7 +201,8 @@ async fn spawn_client() {
             println!("------------------------------------");
             println!("What do you want to do?");
             println!("(1) Make new order");
-            println!("(2) Get an order");
+            println!("(2) Edit an order");
+            println!("(3) Get an order");
             println!("(v) View orders");
             println!("(r) Reload");
             println!("(q) Exit");
@@ -224,67 +226,14 @@ async fn spawn_client() {
                     },
                     "r" => continue 'outer,
                     "1" => {
-                        println!("name: ");
-
-                        buffer.clear();
-                        let Ok(_) = input.read_line(&mut buffer).await else {
-                            break 'outer;
+                        let Some(mut request) = fun_name(&mut buffer, &mut input).await else {
+                            break 'outer
                         };
 
-                        let mut name = buffer.trim().to_owned();
-
-                        let mut amounts = PizzaKindArray::splat(0);
-                        for i in 0..PizzaKind::Length {
-                            println!("amount of type {i}: ");
-
-                            let amount = loop {
-                                buffer.clear();
-                                let Ok(_) = input.read_line(&mut buffer).await else {
-                                    break 'outer;
-                                };
-
-                                match buffer.trim().parse::<OrderAmount>() {
-                                    Ok(amount) => break amount,
-                                    Err(err) => {
-                                        println!("Error {}", err);
-                                        println!("Invalid input. Please input a non-negative integer: ");
-                                        continue
-                                    }
-                                }
-                            };
-
-                            amounts.0[i] = amount
-                        }
-
-                        println!("preference (from shape = 0 to amount = 1): ");
-
-                        let preference = loop {
-                            buffer.clear();
-                            let Ok(_) = input.read_line(&mut buffer).await else {
-                                break 'outer;
-                            };
-
-                            let Ok(preference) = buffer.trim().parse::<Preference>() else {
-                                println!("Invalid input. Please input a number: ");
-                                continue
-                            };
-
-                            if preference < 0.0 || preference > 1.0 {
-                                println!("Invalid input. Must be in 0..1: ");
-                                continue
-                            }
-
-                            break preference
-                        };
+                        let order = request.order;
 
                         loop {
-                            let Ok(string) = serde_json::to_string(&ClientPackage::MakeOrder(OrderRequest {
-                                name,
-                                order: Order {
-                                    amounts,
-                                    preference,
-                                },
-                            })) else {
+                            let Ok(string) = serde_json::to_string(&ClientPackage::MakeOrder(request)) else {
                                 println!("Could not create request");
                                 break 'outer
                             };
@@ -335,7 +284,10 @@ async fn spawn_client() {
                                         break 'outer;
                                     };
 
-                                    name = buffer.trim().to_owned();
+                                    request = OrderRequest {
+                                        name: buffer.trim().to_owned(),
+                                        order,
+                                    };
                                     continue
                                 },
                             }
@@ -344,6 +296,76 @@ async fn spawn_client() {
                         }
                     },
                     "2" => {
+                        let Some(mut request) = fun_name(&mut buffer, &mut input).await else {
+                            break 'outer
+                        };
+
+                        let order = request.order;
+
+                        loop {
+                            let Ok(string) = serde_json::to_string(&ClientPackage::EditOrder(request)) else {
+                                println!("Could not create request");
+                                break 'outer
+                            };
+
+                            if sender.lock().await
+                                .send(Message::Text(string))
+                                .await
+                                .is_err()
+                            {
+                                break 'outer
+                            }
+
+                            let Ok(response) = rr.recv() else {
+                                break 'outer
+                            };
+
+                            let Response::EditOrder(response) = response else {
+                                println!("Got invalid response try again later");
+                                break
+                            };
+
+                            match response {
+                                EditOrderResponse::Success => println!("\x1B[32m>>> Request edited successfully\x1B[37m"),
+                                EditOrderResponse::NameNotFound => {
+                                    println!("Name does not exist. Do you want to try again? (y/n):");
+
+                                    loop {
+                                        buffer.clear();
+                                        let Ok(_) = input.read_line(&mut buffer).await else {
+                                            break 'outer;
+                                        };
+
+                                        match buffer.trim() {
+                                            "y" => break,
+                                            "n" => continue 'outer,
+
+                                            _ => {
+                                                println!("Invalid command");
+                                                continue
+                                            }
+                                        }
+                                    }
+
+                                    println!("Type in a new name:");
+
+                                    buffer.clear();
+                                    let Ok(_) = input.read_line(&mut buffer).await else {
+                                        break 'outer;
+                                    };
+
+                                    request = OrderRequest {
+                                        name: buffer.trim().to_owned(),
+                                        order,
+                                    };
+                                    continue
+                                },
+                            }
+
+                            break
+                        }
+                    },
+                    "3" => {
                         println!("name: ");
 
                         buffer.clear();
@@ -438,4 +460,67 @@ async fn spawn_client() {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
     };
+}
+
+async fn fun_name(buffer: &mut String, input: &mut BufReader<tokio::io::Stdin>) -> Option<OrderRequest> {
+    println!("name: ");
+
+    buffer.clear();
+    let Ok(_) = input.read_line(buffer).await else {
+        return None
+    };
+
+    let name = buffer.trim().to_owned();
+
+    let mut amounts = PizzaKindArray::splat(0);
+    for i in 0..PizzaKind::Length {
+        println!("amount of type {i}: ");
+
+        let amount = loop {
+            buffer.clear();
+            let Ok(_) = input.read_line(buffer).await else {
+                return None
+            };
+
+            match buffer.trim().parse::<OrderAmount>() {
+                Ok(amount) => break amount,
+                Err(err) => {
+                    println!("Error {}", err);
+                    println!("Invalid input. Please input a non-negative integer: ");
+                    continue
+                }
+            }
+        };
+
+        amounts.0[i] = amount
+    }
+
+    println!("preference (from shape = 0 to amount = 1): ");
+
+    let preference = loop {
+        buffer.clear();
+        let Ok(_) = input.read_line(buffer).await else {
+            return None
+        };
+
+        let Ok(preference) = buffer.trim().parse::<Preference>() else {
+            println!("Invalid input. Please input a number: ");
+            continue
+        };
+
+        if preference < 0.0 || preference > 1.0 {
+            println!("Invalid input. Must be in 0..1: ");
+            continue
+        }
+
+        break preference
+    };
+
+    return Some(OrderRequest {
+        name,
+        order: Order {
+            amounts,
+            preference,
+        },
+    })
 }

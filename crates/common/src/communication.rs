@@ -19,7 +19,8 @@ pub struct FullOrderData<'a> {
 #[derive(Serialize, Deserialize)]
 pub enum ClientPackage {
     MakeOrder(OrderRequest),
-    GetOrder(String),
+    EditOrder(OrderRequest),
+    GetOrder(String), // Currently redundant, since client should keep track of the servers state
     RequestAll,
 }
 
@@ -40,6 +41,7 @@ pub enum ServerPackage<'a> {
 #[derive(Serialize, Deserialize)]
 pub enum Response {
     MakeOrder(MakeOrderResponse),
+    EditOrder(EditOrderResponse),
     GetOrder(GetOrderResponse),
 }
 
@@ -47,6 +49,12 @@ pub enum Response {
 pub enum MakeOrderResponse {
     Success,
     NameAlreadyRegistered,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum EditOrderResponse {
+    Success,
+    NameNotFound,
 }
 
 #[derive(Serialize, Deserialize)]
