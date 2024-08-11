@@ -106,18 +106,24 @@ pub struct PizzaKindArray<T>(pub [T; PizzaKind::Length]);
 
 impl<T> PizzaKindArray<T> {
     pub fn splat(value: T) -> Self where T: Clone {
-        let mut values: MaybeUninit<[T; PizzaKind::Length]> = MaybeUninit::uninit();
-        unsafe {
-            if PizzaKind::Length == 0 {
-                return Self(values.assume_init())
-            }
-
-            for i in 1..PizzaKind::Length {
-                values.assume_init_mut()[i] = value.clone()
-            }
-            values.assume_init_mut()[0] = value;
-            return Self(values.assume_init())
+        if PizzaKind::Length == 0 {
+            // SAFETY: since length is zero, it is already initialized
+            return Self(unsafe {MaybeUninit::uninit().assume_init()})
         }
+
+        // SAFETY: transposing MaybeUninit<[T; n]> to [MaybeUninit<T>; n] is always safe, since no invalid memory can be read
+        let mut values: [MaybeUninit<T>; PizzaKind::Length] = unsafe { MaybeUninit::uninit().assume_init() };
+
+        // iterate starting from 1 and later move value into element 0, so as to avoid an unnecessary clone and drop
+        for i in 1..PizzaKind::Length {
+            values[i].write(value.clone());
+        }
+        values[0].write(value);
+
+        // SAFETY: since every element is initialized and MaybeUninit<T> has the same size, alignment and ABI as T, we can safely convert the array
+        // raw pointer conversion needed, since std::mem::transmute does not work in generic code
+        // the read is safe, since MaybeUninit<T> will never get dropped
+        return Self(unsafe { (values.as_mut_ptr() as *mut [T; PizzaKind::Length]).read() })
     }
 
     pub fn map<S>(self, f: impl FnMut(T) -> S) -> PizzaKindArray<S> {
