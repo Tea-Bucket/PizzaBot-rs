@@ -105,6 +105,7 @@ impl PizzaKind {
 pub struct PizzaKindArray<T>(pub [T; PizzaKind::Length]);
 
 impl<T> PizzaKindArray<T> {
+    /// Creates an array where each element is value
     pub fn splat(value: T) -> Self where T: Clone {
         if PizzaKind::Length == 0 {
             // SAFETY: since length is zero, it is already initialized
@@ -126,10 +127,12 @@ impl<T> PizzaKindArray<T> {
         return Self(unsafe { (values.as_mut_ptr() as *mut [T; PizzaKind::Length]).read() })
     }
 
+    /// Maps the array elementwise using the provided function
     pub fn map<S>(self, f: impl FnMut(T) -> S) -> PizzaKindArray<S> {
         PizzaKindArray(self.0.map(f))
     }
 
+    /// Combines two arrays elementwise using the provided function
     pub fn zip_map<S, R>(self, other: PizzaKindArray<S>, mut f: impl FnMut(T, S) -> R) -> PizzaKindArray<R> {
         let mut res: MaybeUninit<[R; PizzaKind::Length]> = MaybeUninit::uninit();
         for (i, (s, o)) in self.into_iter().zip(other).enumerate() {
@@ -141,11 +144,13 @@ impl<T> PizzaKindArray<T> {
         PizzaKindArray(unsafe { res.assume_init() })
     }
 
+    /// Combines each element to a single value using the provided function, assuming `TypeKind::Length > 0`
     pub fn reduce(self, f: impl Fn(T, T) -> T) -> T {
         let Some(acc) = self.0.into_iter().reduce(f) else {unreachable!()};
         return acc
     }
 
+    /// Sums up all elements
     pub fn sum<S: Sum<T>>(self) -> S {
         self.into_iter().sum()
     }
