@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::orders::{Distribution, FullOrder, Order, OrderInfo, OrderRequest, OrderStateVersion, PizzaAmount, PizzaKindArray};
 
 #[derive(Serialize, Deserialize)]
+pub struct LoginData {
+    pub name: String;
+    pub password: String;
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct FullOrderData<'a> {
     pub version: OrderStateVersion,
 
@@ -22,6 +28,7 @@ pub enum ClientPackage {
     EditOrder(OrderRequest),
     GetOrder(String), // Currently redundant, since client should keep track of the servers state
     RequestAll,
+    Login(LoginData),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +50,7 @@ pub enum Response {
     MakeOrder(MakeOrderResponse),
     EditOrder(EditOrderResponse),
     GetOrder(GetOrderResponse),
+    Login(LoginResponse),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,4 +69,11 @@ pub enum EditOrderResponse {
 pub enum GetOrderResponse {
     Success(FullOrder),
     NameNotFound,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum LoginResponse {
+    Success,
+    UserNotFound,
+    WrongPassword,
 }
