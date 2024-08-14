@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{self, EditOrderResponse, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderState, Price}};
+use pizza_bot_rs_common::{communication::{self, EditOrderResponse, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderRequest, OrderState, Price}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
@@ -207,104 +207,10 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
                     };
 
                     match request {
-                        communication::ClientPackage::MakeOrder(order) => {
-                            info!("`{}` made request `(amount: {:?}, preference: {})`", order.name, order.order.amounts.0, order.order.preference);
-
-                            let mut orders = state.orders.lock().await;
-                            let success = orders.try_add_order(order.name, order.order);
-
-                            let response = match success {
-                                Some(full) => {
-                                    broadcast_serialized(ServerPackage::Update {
-                                        order: full,
-                                        config: orders.config,
-
-                                        version: orders.version,
-                                        distributions: Cow::Borrowed(&orders.distributions),
-                                        distributions_valid: orders.distributions_valid,
-                                    }, &state.broadcast);
-                                    drop(orders);
-                                    MakeOrderResponse::Success
-                                },
-                                None => {
-                                    drop(orders);
-                                    MakeOrderResponse::NameAlreadyRegistered
-                                },
-                            };
-
-                            let mut sender = sender.lock().await;
-                            send_serialized(ServerPackage::Response(Response::MakeOrder(response)), &mut sender).await;
-                            drop(sender);
-                        },
-                        communication::ClientPackage::EditOrder(order) => {
-                            info!("Order edit for `{}` with `(amount: {:?}, preference: {})` requested", order.name, order.order.amounts.0, order.order.preference);
-
-                            let mut orders = state.orders.lock().await;
-                            let success = orders.try_edit_order(order.name, order.order);
-
-                            let response = match success {
-                                Some(full) => {
-                                    broadcast_serialized(ServerPackage::Update {
-                                        order: full,
-                                        config: orders.config,
-
-                                        version: orders.version,
-                                        distributions: Cow::Borrowed(&orders.distributions),
-                                        distributions_valid: orders.distributions_valid,
-                                    }, &state.broadcast);
-                                    drop(orders);
-                                    EditOrderResponse::Success
-                                },
-                                None => {
-                                    drop(orders);
-                                    EditOrderResponse::NameNotFound
-                                },
-                            };
-
-                            let mut sender = sender.lock().await;
-                            send_serialized(ServerPackage::Response(Response::EditOrder(response)), &mut sender).await;
-                            drop(sender);
-                        },
-                        communication::ClientPackage::GetOrder(name) => {
-                            info!("Order for `{name}` requested");
-
-                            let orders = state.orders.lock().await;
-                            let response = match orders.order_infos.binary_search_by(|info| info.name.cmp(&name)) {
-                                Ok(index) => {
-                                    let info = orders.order_infos[index].clone();
-                                    let order = orders.orders[index];
-                                    let distribution = orders.distributions[index];
-                                    drop(orders);
-
-                                    GetOrderResponse::Success(FullOrder {
-                                        info,
-                                        order,
-                                        distribution
-                                    })
-                                },
-                                Err(_) => {
-                                    drop(orders);
-
-                                    GetOrderResponse::NameNotFound
-                                },
-                            };
-
-                            let mut sender = sender.lock().await;
-                            send_serialized(ServerPackage::Response(Response::GetOrder(response)), &mut sender).await;
-                            drop(sender);
-                        },
-                        communication::ClientPackage::RequestAll => {
-                            info!("Full state requested");
-
-                            {   // Send initialize package
-                                let orders = state.orders.lock().await;
-                                let init = orders.to_full_data();
-
-                                let mut sender = sender.lock().await;
-                                send_serialized(&ServerPackage::All(init), &mut sender).await;
-                                drop(sender);
-                            }
-                        }
+                        communication::ClientPackage::MakeOrder(order) => handle_make_order(order, &state, &sender).await,
+                        communication::ClientPackage::EditOrder(order) => handle_edit_order(order, &state, &sender).await,
+                        communication::ClientPackage::GetOrder(name) => handle_get_order(name, &state, &sender).await,
+                        communication::ClientPackage::RequestAll => handle_request_all(&state, &sender).await,
                     }
                 },
                 Message::Close(c) => {
@@ -330,4 +236,100 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
     };
+}
+
+async fn handle_make_order(order: OrderRequest, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
+    info!("`{}` made request `(amount: {:?}, preference: {})`", order.name, order.order.amounts.0, order.order.preference);
+
+    let mut orders = state.orders.lock().await;
+    let success = orders.try_add_order(order.name, order.order);
+
+    let response = match success {
+        Some(full) => {
+            broadcast_serialized(ServerPackage::Update {
+                order: full,
+                config: orders.config,
+
+                version: orders.version,
+                distributions: Cow::Borrowed(&orders.distributions),
+                distributions_valid: orders.distributions_valid,
+            }, &state.broadcast);
+            drop(orders);
+            MakeOrderResponse::Success
+        },
+        None => {
+            drop(orders);
+            MakeOrderResponse::NameAlreadyRegistered
+        },
+    };
+
+    let mut sender = sender.lock().await;
+    send_serialized(ServerPackage::Response(Response::MakeOrder(response)), &mut sender).await;
+    drop(sender);
+}
+
+async fn handle_edit_order(order: OrderRequest, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
+    info!("Order edit for `{}` with `(amount: {:?}, preference: {})` requested", order.name, order.order.amounts.0, order.order.preference);
+    let mut orders = state.orders.lock().await;
+    let success = orders.try_edit_order(order.name, order.order);
+    let response = match success {
+        Some(full) => {
+            broadcast_serialized(ServerPackage::Update {
+                order: full,
+                config: orders.config,
+
+                version: orders.version,
+                distributions: Cow::Borrowed(&orders.distributions),
+                distributions_valid: orders.distributions_valid,
+            }, &state.broadcast);
+            drop(orders);
+            EditOrderResponse::Success
+        },
+        None => {
+            drop(orders);
+            EditOrderResponse::NameNotFound
+        },
+    };
+    let mut sender = sender.lock().await;
+    send_serialized(ServerPackage::Response(Response::EditOrder(response)), &mut sender).await;
+    drop(sender);
+}
+
+async fn handle_get_order(name: String, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
+    info!("Order for `{name}` requested");
+    let orders = state.orders.lock().await;
+    let response = match orders.order_infos.binary_search_by(|info| info.name.cmp(&name)) {
+        Ok(index) => {
+            let info = orders.order_infos[index].clone();
+            let order = orders.orders[index];
+            let distribution = orders.distributions[index];
+            drop(orders);
+
+            GetOrderResponse::Success(FullOrder {
+                info,
+                order,
+                distribution
+            })
+        },
+        Err(_) => {
+            drop(orders);
+
+            GetOrderResponse::NameNotFound
+        },
+    };
+    let mut sender = sender.lock().await;
+    send_serialized(ServerPackage::Response(Response::GetOrder(response)), &mut sender).await;
+    drop(sender);
+}
+
+async fn handle_request_all(state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
+    info!("Full state requested");
+    {   // Send initialize package
+        let orders = state.orders.lock().await;
+        let init = orders.to_full_data();
+
+        let mut sender = sender.lock().await;
+        send_serialized(&ServerPackage::All(init), &mut sender).await;
+        drop(sender);
+    }
 }
