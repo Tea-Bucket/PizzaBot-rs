@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
-use pizza_bot_rs_common::{communication::{self, EditOrderResponse, GetOrderResponse, MakeOrderResponse, Response, ServerPackage}, orders::{FullOrder, Order, OrderInfo, OrderRequest, OrderState, Price}};
+use pizza_bot_rs_common::{communication::{self, EditOrderResponse, GetOrderResponse, MakeOrderResponse, Response, ServerPackage, SubscriptionResponse}, orders::{FullOrder, Order, OrderInfo, OrderRequest, OrderState, Price}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::info;
 
@@ -154,7 +154,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| web_socket_thread(socket, addr, state))
 }
 
-async fn send_serialized<'a>(message: ServerPackage<'a>, sender: &mut SplitSink<WebSocket, Message>) {
+async fn send_serialized(message: ServerPackage<'_>, sender: &mut SplitSink<WebSocket, Message>) {
     let Ok(string) = serde_json::to_string(&message) else {
         // TODO handle, although currently the serializer should not be able to fail
         panic!("Could not create response");
@@ -162,80 +162,63 @@ async fn send_serialized<'a>(message: ServerPackage<'a>, sender: &mut SplitSink<
     sender.send(Message::Text(string)).await.expect("Could not send message");
 }
 
-fn broadcast_serialized(message: impl serde::ser::Serialize, sender: &broadcast::Sender<String>) {
+fn broadcast_serialized(message: ServerPackage<'_>, sender: &broadcast::Sender<String>) {
     let Ok(string) = serde_json::to_string(&message) else {
         // TODO handle, although currently the serializer should not be able to fail
         panic!("Could not create response");
     };
-    sender.send(string).expect("Could not send message");
+
+    match sender.send(string) {
+        Ok(_) => {},
+        Err(_) => {},
+    }
 }
 
 async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerState) {
-    let (mut sender, mut receiver) = socket.split();
-
-    {   // Send initialize package
-        let orders = state.orders.lock().await;
-        let init = orders.to_full_data();
-
-        send_serialized(ServerPackage::All(init), &mut sender).await;
-    }
+    let (sender, mut receiver) = socket.split();
 
     let sender = Arc::new(Mutex::new(sender));
+    let mut updater = None;
 
-    let mut rx = state.broadcast.subscribe();
+    while let Some(Ok(msg)) = receiver.next().await {
+        match msg {
+            // Entire communication over text, specifically common::ClientPackage/common::ServerPackage
+            Message::Text(t) => 'blk: {
+                let Ok(request) = serde_json::from_str::<communication::ClientPackage>(&t) else {
+                    // TODO handle malformed request
+                    break 'blk
+                };
 
-    // Send all broadcast through
-    let mut send_task = {
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            while let Ok(msg) = rx.recv().await {
-                if sender.lock().await.send(Message::Text(msg)).await.is_err() {
-                    break;
+                match request {
+                    communication::ClientPackage::MakeOrder(order) => handle_make_order(order, &state, &sender).await,
+                    communication::ClientPackage::EditOrder(order) => handle_edit_order(order, &state, &sender).await,
+                    communication::ClientPackage::GetOrder(name) => handle_get_order(name, &state, &sender).await,
+                    communication::ClientPackage::RequestAll => handle_request_all(&state, &sender).await,
+                    communication::ClientPackage::SubscribeUpdates => handle_subscribe(&mut updater, &state, &sender).await,
+                    communication::ClientPackage::UnsubscribeUpdates => handle_unsubscribe(&mut updater),
                 }
-            }
-        })
-    };
+            },
+            Message::Close(c) => {
+                if let Some(cf) = c {
+                    info!(
+                        "{} sent close with code {} and reason `{}`",
+                        who, cf.code, cf.reason
+                    );
+                } else {
+                    info!("{who} somehow sent close message without CloseFrame");
+                }
+                break
+            },
 
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                // Entire communication over text, specifically common::ClientPackage/common::ServerPackage
-                Message::Text(t) => 'blk: {
-                    let Ok(request) = serde_json::from_str::<communication::ClientPackage>(&t) else {
-                        // TODO handle malformed request
-                        break 'blk
-                    };
-
-                    match request {
-                        communication::ClientPackage::MakeOrder(order) => handle_make_order(order, &state, &sender).await,
-                        communication::ClientPackage::EditOrder(order) => handle_edit_order(order, &state, &sender).await,
-                        communication::ClientPackage::GetOrder(name) => handle_get_order(name, &state, &sender).await,
-                        communication::ClientPackage::RequestAll => handle_request_all(&state, &sender).await,
-                    }
-                },
-                Message::Close(c) => {
-                    if let Some(cf) = c {
-                        info!(
-                            "{} sent close with code {} and reason `{}`",
-                            who, cf.code, cf.reason
-                        );
-                    } else {
-                        info!("{who} somehow sent close message without CloseFrame");
-                    }
-                    break
-                },
-
-                Message::Binary(_) |
-                Message::Pong(_) |
-                Message::Ping(_) => {}
-            }
+            Message::Binary(_) |
+            Message::Pong(_) |
+            Message::Ping(_) => {}
         }
-    });
+    }
 
-    tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
-    };
+    if let Some(updater) = updater {
+        updater.abort();
+    }
 }
 
 async fn handle_make_order(order: OrderRequest, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
@@ -324,12 +307,48 @@ async fn handle_get_order(name: String, state: &AppState, sender: &Mutex<SplitSi
 
 async fn handle_request_all(state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
     info!("Full state requested");
-    {   // Send initialize package
+    let orders = state.orders.lock().await;
+    let init = orders.to_full_data();
+
+    let mut sender = sender.lock().await;
+    send_serialized(ServerPackage::All(init), &mut sender).await;
+    drop(sender);
+}
+
+async fn handle_subscribe(updater: &mut Option<tokio::task::JoinHandle<()>>, state: &AppState, sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>) {
+    if updater.is_none() {
+        let mut rx = state.broadcast.subscribe();
+
+        let sender = sender.clone();
+
+        info!("Full state requested");
         let orders = state.orders.lock().await;
         let init = orders.to_full_data();
 
+        {
+            let mut sender = sender.lock().await;
+            send_serialized(ServerPackage::Response(Response::Subscription(SubscriptionResponse::Success(init))), &mut sender).await;
+            drop(sender);
+        }
+
+        // Send all broadcast through
+        *updater = Some(tokio::spawn(async move {
+            while let Ok(msg) = rx.recv().await {
+                if sender.lock().await.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+        }));
+    } else {
         let mut sender = sender.lock().await;
-        send_serialized(ServerPackage::All(init), &mut sender).await;
+        send_serialized(ServerPackage::Response(Response::Subscription(SubscriptionResponse::AlreadySubscribed)), &mut sender).await;
         drop(sender);
+    }
+}
+
+fn handle_unsubscribe(updater: &mut Option<tokio::task::JoinHandle<()>>) {
+    if let Some(up) = updater {
+        up.abort();
+        *updater = None
     }
 }

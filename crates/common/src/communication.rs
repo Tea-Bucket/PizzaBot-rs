@@ -22,11 +22,14 @@ pub enum ClientPackage {
     EditOrder(OrderRequest),
     GetOrder(String), // Currently redundant, since client should keep track of the servers state
     RequestAll,
+
+    SubscribeUpdates,
+    UnsubscribeUpdates
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum ServerPackage<'a> {
-    Response(Response),
+    Response(Response<'a>),
     Update {
         order: FullOrder,
 
@@ -39,10 +42,11 @@ pub enum ServerPackage<'a> {
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum Response {
+pub enum Response<'a> {
     MakeOrder(MakeOrderResponse),
     EditOrder(EditOrderResponse),
     GetOrder(GetOrderResponse),
+    Subscription(SubscriptionResponse<'a>)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,4 +65,10 @@ pub enum EditOrderResponse {
 pub enum GetOrderResponse {
     Success(FullOrder),
     NameNotFound,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum SubscriptionResponse<'a> {
+    Success(FullOrderData<'a>),
+    AlreadySubscribed
 }
