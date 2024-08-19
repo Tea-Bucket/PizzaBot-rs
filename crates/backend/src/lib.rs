@@ -154,7 +154,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| web_socket_thread(socket, addr, state))
 }
 
-async fn send_serialized(message: impl serde::ser::Serialize, sender: &mut SplitSink<WebSocket, Message>) {
+async fn send_serialized<'a>(message: ServerPackage<'a>, sender: &mut SplitSink<WebSocket, Message>) {
     let Ok(string) = serde_json::to_string(&message) else {
         // TODO handle, although currently the serializer should not be able to fail
         panic!("Could not create response");
@@ -177,7 +177,7 @@ async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerSta
         let orders = state.orders.lock().await;
         let init = orders.to_full_data();
 
-        send_serialized(&init, &mut sender).await;
+        send_serialized(ServerPackage::All(init), &mut sender).await;
     }
 
     let sender = Arc::new(Mutex::new(sender));
@@ -329,7 +329,7 @@ async fn handle_request_all(state: &AppState, sender: &Mutex<SplitSink<WebSocket
         let init = orders.to_full_data();
 
         let mut sender = sender.lock().await;
-        send_serialized(&ServerPackage::All(init), &mut sender).await;
+        send_serialized(ServerPackage::All(init), &mut sender).await;
         drop(sender);
     }
 }

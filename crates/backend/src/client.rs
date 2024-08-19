@@ -74,8 +74,13 @@ async fn spawn_client() {
             }
         };
 
-        let Ok(all) = serde_json::from_str::<FullOrderData>(&init) else {
+        let Ok(all) = serde_json::from_str::<ServerPackage>(&init) else {
             // TODO handle malformed response
+            return
+        };
+
+        let ServerPackage::All(all) = all else {
+            // TODO handle malfomed initial package
             return
         };
 
