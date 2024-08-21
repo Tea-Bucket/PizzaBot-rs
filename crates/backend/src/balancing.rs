@@ -5,6 +5,7 @@ use pizza_bot_rs_common::orders::{Distribution, Order, OrderAmount, PizzaAmount,
 type SumAmount = usize;
 type Penalty = f32;
 
+/// Calculates the cost of a assigned distribution for a given order
 fn calculate_cost(order: &Order, assigned: Distribution) -> Penalty {
     const epsilon: f32 = 0.0000001;
 
@@ -17,6 +18,7 @@ fn calculate_cost(order: &Order, assigned: Distribution) -> Penalty {
 
     let total_diff = r_total.abs_diff(a_total);
 
+    /// Conversion for the total count penalty
     fn convert(diff: OrderAmount, total: OrderAmount, p: f32, more: bool) -> Penalty {
         let perc = diff as f32 / total as f32;
         if more {
@@ -33,6 +35,7 @@ fn calculate_cost(order: &Order, assigned: Distribution) -> Penalty {
 
     let total_penalty = if total_diff == 0 {0.0} else {convert(total_diff, r_total, count_pref, a_total > r_total)};
 
+    /// Convert a total distribution to their percentages
     fn prepare_values(values: Distribution, total: OrderAmount) -> PizzaKindArray<f32> {
         values.map(|v| v as f32 / total as f32)
     }
@@ -85,6 +88,7 @@ impl TotalPenalty {
     }
 }
 
+/// Determines the distribution with the best `TotalPenalty`, which mostly results in the minimal maximum penalty.
 pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalPenalty, PizzaKindArray<PizzaAmount>, Vec<Distribution>, bool) {
     let pieces_per_whole = pieces_per_whole as SumAmount;
     let mut totals: PizzaKindArray<SumAmount> = PizzaKindArray::splat(0);
@@ -101,11 +105,14 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
     }
 
     impl QueueElement {
+        /// Determines the next best `Distribution`, if the currently assigned is not possible.
+        /// Returns `None`, if there is no such distribution with a finite penalty
         fn best_offset(adds: PizzaKindArray<bool>, deltas: PizzaKindArray<SumAmount>, request: &Order, assigned: Distribution, index: usize) -> Option<Self> {
             let mut best = None;
             let mut penalty = f32::INFINITY;
             'outer:
             for idx in 1..(1 << PizzaKind::Length) {
+                // Determine which kinds to modify
                 let mut modify = PizzaKindArray::splat(false);
                 for (i, (modify, delta)) in modify.iter_mut().zip(deltas).enumerate() {
                     *modify = (idx & (1 << i)) != 0;
@@ -114,6 +121,7 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
                     }
                 }
 
+                // Modify the kinds
                 let mut copy = assigned;
                 for ((copy, modify), add) in copy.iter_mut().zip(modify).zip(adds) {
                     if modify {
@@ -177,6 +185,7 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
 
     'outer:
     for idx in 0..(1 << PizzaKind::Length) {
+        // Determine which kinds should get rounded up (add == true) and which get rounded down (add == false)
         let mut adds = PizzaKindArray::splat(false);
         for (i, (add, total)) in adds.iter_mut().zip(totals).enumerate() {
             *add = (idx & (1 << i)) != 0;
@@ -185,6 +194,7 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
             }
         }
 
+        // Calculate the slice difference between the target amount and the ordered amount
         let mut deltas = PizzaKindArray::splat(0);
         for ((delta, add), total) in deltas.iter_mut().zip(adds).zip(totals) {
             let mut target = (total / pieces_per_whole) * pieces_per_whole;
@@ -196,6 +206,7 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
             }
         }
 
+        // Reset and initialize all temporary values
         queue.clear();
         next_distr.clear();
         next_distr.reserve_exact(requests.len());
@@ -217,10 +228,12 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
             };
 
             'blk: {
+                // Check if the changes are still possible
                 for (offset, delta) in element.offset.into_iter().zip(deltas) {
                     if offset && delta == 0 {break 'blk}
                 }
 
+                // Apply the changes
                 for (((next, delta), offset), add) in next_distr[element.request_index].iter_mut().zip(&mut deltas).zip(element.offset).zip(adds) {
                     if offset {
                         if add {
@@ -261,6 +274,7 @@ pub fn get_best(pieces_per_whole: OrderAmount, requests: &Vec<Order>) -> (TotalP
 
     let is_valid = !penalty.worst.is_infinite();
 
+    // An invalid distribution should lead to no pizza
     if !is_valid {
         for distr in &mut best_distribution {
             *distr = PizzaKindArray::splat(0)

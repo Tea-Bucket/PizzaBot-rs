@@ -154,11 +154,13 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| web_socket_thread(socket, addr, state))
 }
 
-async fn send_serialized(message: ServerPackage<'_>, sender: &mut SplitSink<WebSocket, Message>) {
+async fn send_package(message: ServerPackage<'_>, sender: &Mutex<SplitSink<WebSocket, Message>>) {
     let Ok(string) = serde_json::to_string(&message) else {
         // TODO handle, although currently the serializer should not be able to fail
         panic!("Could not create response");
     };
+
+    let mut sender = sender.lock().await;
     sender.send(Message::Text(string)).await.expect("Could not send message");
 }
 
@@ -168,16 +170,15 @@ fn broadcast_serialized(message: ServerPackage<'_>, sender: &broadcast::Sender<S
         panic!("Could not create response");
     };
 
-    match sender.send(string) {
-        Ok(_) => {},
-        Err(_) => {},
-    }
+    // No need to handle result, since the only error it returns is the fact that there was no receiver
+    let _ = sender.send(string);
 }
 
 async fn web_socket_thread(socket: WebSocket, who: SocketAddr, state: HandlerState) {
     let (sender, mut receiver) = socket.split();
-
     let sender = Arc::new(Mutex::new(sender));
+
+    // Updater is only present if updates are requested
     let mut updater = None;
 
     while let Some(Ok(msg)) = receiver.next().await {
@@ -246,9 +247,7 @@ async fn handle_make_order(order: OrderRequest, state: &AppState, sender: &Mutex
         },
     };
 
-    let mut sender = sender.lock().await;
-    send_serialized(ServerPackage::Response(Response::MakeOrder(response)), &mut sender).await;
-    drop(sender);
+    send_package(ServerPackage::Response(Response::MakeOrder(response)), sender).await;
 }
 
 async fn handle_edit_order(order: OrderRequest, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
@@ -273,9 +272,8 @@ async fn handle_edit_order(order: OrderRequest, state: &AppState, sender: &Mutex
             EditOrderResponse::NameNotFound
         },
     };
-    let mut sender = sender.lock().await;
-    send_serialized(ServerPackage::Response(Response::EditOrder(response)), &mut sender).await;
-    drop(sender);
+
+    send_package(ServerPackage::Response(Response::EditOrder(response)), sender).await;
 }
 
 async fn handle_get_order(name: String, state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
@@ -300,9 +298,7 @@ async fn handle_get_order(name: String, state: &AppState, sender: &Mutex<SplitSi
             GetOrderResponse::NameNotFound
         },
     };
-    let mut sender = sender.lock().await;
-    send_serialized(ServerPackage::Response(Response::GetOrder(response)), &mut sender).await;
-    drop(sender);
+    send_package(ServerPackage::Response(Response::GetOrder(response)), sender).await;
 }
 
 async fn handle_request_all(state: &AppState, sender: &Mutex<SplitSink<WebSocket, Message>>) {
@@ -310,27 +306,19 @@ async fn handle_request_all(state: &AppState, sender: &Mutex<SplitSink<WebSocket
     let orders = state.orders.lock().await;
     let init = orders.to_full_data();
 
-    let mut sender = sender.lock().await;
-    send_serialized(ServerPackage::All(init), &mut sender).await;
-    drop(sender);
+    send_package(ServerPackage::All(init), sender).await;
 }
 
 async fn handle_subscribe(updater: &mut Option<tokio::task::JoinHandle<()>>, state: &AppState, sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>) {
     if updater.is_none() {
         let mut rx = state.broadcast.subscribe();
 
-        let sender = sender.clone();
-
-        info!("Full state requested");
         let orders = state.orders.lock().await;
         let init = orders.to_full_data();
+        send_package(ServerPackage::Response(Response::Subscription(SubscriptionResponse::Success(init))), sender).await;
+        drop(orders);
 
-        {
-            let mut sender = sender.lock().await;
-            send_serialized(ServerPackage::Response(Response::Subscription(SubscriptionResponse::Success(init))), &mut sender).await;
-            drop(sender);
-        }
-
+        let sender = sender.clone();
         // Send all broadcast through
         *updater = Some(tokio::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -340,9 +328,7 @@ async fn handle_subscribe(updater: &mut Option<tokio::task::JoinHandle<()>>, sta
             }
         }));
     } else {
-        let mut sender = sender.lock().await;
-        send_serialized(ServerPackage::Response(Response::Subscription(SubscriptionResponse::AlreadySubscribed)), &mut sender).await;
-        drop(sender);
+        send_package(ServerPackage::Response(Response::Subscription(SubscriptionResponse::AlreadySubscribed)), sender).await;
     }
 }
 
